@@ -18,14 +18,19 @@ KsdjLKRDtKpXormCUTs/V+0CAwEAAQ==
 
 export const config = { api: { bodyParser: false } };
 
-let client;
+// Глобальная переменная для клиента MongoDB
+let clientPromise;
 
 async function getMongoClient() {
-  if (!client) {
-    client = new MongoClient(process.env.MONGODB_URI);
-    await client.connect();
+  if (!process.env.MONGODB_URI) {
+    throw new Error("MONGODB_URI не задана в переменных окружения");
   }
-  return client;
+
+  if (!clientPromise) {
+    const client = new MongoClient(process.env.MONGODB_URI);
+    clientPromise = client.connect();
+  }
+  return clientPromise;
 }
 
 export default async function handler(req, res) {
@@ -66,7 +71,7 @@ export default async function handler(req, res) {
       { upsert: true }
     );
 
-    console.log(result.upsertedCount ? "Новый заказ добавлен" : "Заказ обновлен");
+    console.log(result.upsertedCount ? `Новый заказ добавлен: ${id}` : `Заказ обновлен: ${id}`);
 
     return res.status(200).json({ ok: true });
   } catch (err) {
