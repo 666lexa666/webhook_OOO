@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { MongoClient } from "mongodb";
 
 const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAtlD5ORxXDUgnnD9Ri2IB
@@ -17,41 +18,55 @@ KsdjLKRDtKpXormCUTs/V+0CAwEAAQ==
 
 export const config = { api: { bodyParser: false } };
 
+let client;
+
+async function getMongoClient() {
+  if (!client) {
+    client = new MongoClient(process.env.MONGODB_URI);
+    await client.connect();
+  }
+  return client;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    // читаем raw body
+    // Читаем raw body
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString("utf8");
 
+    // Проверка подписи
     const signature = req.headers["payment-sign"];
     const verifier = crypto.createVerify("RSA-SHA1");
     verifier.update(rawBody);
     const isValid = verifier.verify(PUBLIC_KEY, Buffer.from(signature, "base64"));
     if (!isValid) return res.status(400).json({ error: "Invalid signature" });
 
-    // парсим JSON после проверки подписи
-    const { success, description, order } = JSON.parse(rawBody);
+    // Разбор JSON
+    const { order } = JSON.parse(rawBody);
+    const { id, orderAmount, status } = order;
 
-    const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-    const CHAT_ID = process.env.CHAT_ID;
+    // Сопоставление статусов
+    let dbStatus = "В процессе";
+    if (["IPS_ACCEPTED", "CHARGED"].includes(status)) dbStatus = "Оплачено";
+    if (status === "QRCDATA_CREATED") dbStatus = "В процессе";
+    if (status === "DECLINED") dbStatus = "Отменен";
 
-    const text = `
-📌 Новый заказ
-🆔 Order ID: ${order?.id}
-✅ Success: ${success}
-📦 Статус: *${order?.status}*
-💰 Сумма: ${order?.orderAmount} ${order?.orderCurrency}
-📝 Описание: ${description || "—"}
-    `;
+    // Подключение к MongoDB
+    const mongoClient = await getMongoClient();
+    const db = mongoClient.db(process.env.MONGODB_DB);
+    const orders = db.collection("orders");
 
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "Markdown" }),
-    });
+    // Добавление или обновление заказа
+    const result = await orders.updateOne(
+      { id },
+      { $set: { id, orderAmount: orderAmount / 100, status: dbStatus } },
+      { upsert: true }
+    );
+
+    console.log(result.upsertedCount ? "Новый заказ добавлен" : "Заказ обновлен");
 
     return res.status(200).json({ ok: true });
   } catch (err) {

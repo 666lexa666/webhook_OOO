@@ -1,5 +1,8 @@
 {
   "name": "telegram-webhook",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "mongodb": "^5.8.0"
+  }
 }
