@@ -51,7 +51,7 @@ export default async function handler(req, res) {
 
     // Разбор JSON
     const { order } = JSON.parse(rawBody);
-    const { id, orderAmount, status } = order;
+    const { id, status } = order;
 
     // Сопоставление статусов
     let dbStatus = "В процессе";
@@ -64,15 +64,18 @@ export default async function handler(req, res) {
     const db = mongoClient.db(process.env.MONGODB_DB);
     const orders = db.collection("orders");
 
-    // Добавление или обновление заказа
+    // Обновление статуса заказа по id
     const result = await orders.updateOne(
-      { id },
-      { $set: { id, orderAmount: orderAmount / 100, status: dbStatus } },
-      { upsert: true }
+      { id }, // ищем по id заказа
+      { $set: { status: dbStatus } }
     );
 
-    console.log(result.upsertedCount ? `Новый заказ добавлен: ${id}` : `Заказ обновлен: ${id}`);
+    if (result.matchedCount === 0) {
+      console.log(`Заказ с id ${id} не найден в базе`);
+      return res.status(404).json({ error: "Заказ не найден" });
+    }
 
+    console.log(`Статус заказа ${id} обновлен на: ${dbStatus}`);
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("Ошибка:", err);
