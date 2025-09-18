@@ -18,14 +18,12 @@ KsdjLKRDtKpXormCUTs/V+0CAwEAAQ==
 
 export const config = { api: { bodyParser: false } };
 
-// Глобальная переменная для клиента MongoDB
 let clientPromise;
 
 async function getMongoClient() {
   if (!process.env.MONGODB_URI) {
     throw new Error("MONGODB_URI не задана в переменных окружения");
   }
-
   if (!clientPromise) {
     const client = new MongoClient(process.env.MONGODB_URI);
     clientPromise = client.connect();
@@ -53,20 +51,25 @@ export default async function handler(req, res) {
     const { order } = JSON.parse(rawBody);
     const { id, status } = order;
 
-    // Сопоставление статусов
-    let dbStatus = "В процессе";
+    // Определяем статус для базы
+    let dbStatus = null;
     if (["IPS_ACCEPTED", "CHARGED"].includes(status)) dbStatus = "Оплачено";
-    if (status === "QRCDATA_CREATED") dbStatus = "В процессе";
-    if (status === "DECLINED") dbStatus = "Отменен";
+    else if (status === "DECLINED") dbStatus = "Отменен";
+
+    // Если статус не "Оплачено" и не "Отменен" → игнорируем
+    if (!dbStatus) {
+      console.log(`Статус ${status} проигнорирован для заказа ${id}`);
+      return res.status(200).json({ ok: true, ignored: true });
+    }
 
     // Подключение к MongoDB
     const mongoClient = await getMongoClient();
     const db = mongoClient.db(process.env.MONGODB_DB);
     const orders = db.collection("orders");
 
-    // Обновление статуса заказа по id
+    // Обновляем статус только если найден заказ
     const result = await orders.updateOne(
-      { id }, // ищем по id заказа
+      { id },
       { $set: { status: dbStatus } }
     );
 
