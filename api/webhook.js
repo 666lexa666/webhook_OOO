@@ -37,12 +37,16 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
+    // ========================
     // Читаем raw body
+    // ========================
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString("utf8");
 
+    // ========================
     // Проверка подписи
+    // ========================
     const signature = req.headers["payment-sign"];
     const verifier = crypto.createVerify("RSA-SHA1");
     verifier.update(rawBody);
@@ -52,9 +56,9 @@ export default async function handler(req, res) {
     const { order } = JSON.parse(rawBody);
     const { id, status } = order;
 
-    // =======================
-    // ПОДКЛЮЧЕНИЕ К БАЗАМ
-    // =======================
+    // ========================
+    // Подключение к MongoDB
+    // ========================
     const mongoClient = await getMongoClient();
 
     if (!cachedDb1) cachedDb1 = mongoClient.db(process.env.MONGODB_DB);
@@ -63,13 +67,17 @@ export default async function handler(req, res) {
     const orders1 = cachedDb1.collection("orders");
     const orders2 = cachedDb2.collection("orders");
 
-    // =======================
+    // ========================
     // ПЕРВАЯ БАЗА (основная)
-    // =======================
-    const orderInDb = await orders1.findOne({ id });
+    // ========================
+    const orderInDb = await orders1.findOne({ operation_id: id });
+
     if (orderInDb) {
       if (["IPS_ACCEPTED", "CHARGED"].includes(status)) {
-        await orders1.updateOne({ id }, { $set: { status: "Оплачено" } });
+        await orders1.updateOne(
+          { operation_id: id },
+          { $set: { status: "Оплачено" } }
+        );
 
         // Получаем exchange_rate
         const rateRes = await fetch("https://desslyhub.com/api/v1/exchange_rate/steam/5", {
@@ -98,7 +106,7 @@ export default async function handler(req, res) {
 
         // Обновляем Mongo с transaction_id и status_steam
         await orders1.updateOne(
-          { id },
+          { operation_id: id },
           {
             $set: {
               transaction_id: topupData.transaction_id,
@@ -109,24 +117,30 @@ export default async function handler(req, res) {
 
         console.log(`Заказ ${id} в основной базе обработан и топап выполнен`);
       } else if (status === "DECLINED") {
-        await orders1.updateOne({ id }, { $set: { status: "Отменен" } });
+        await orders1.updateOne(
+          { operation_id: id },
+          { $set: { status: "Отменен" } }
+        );
         console.log(`Заказ ${id} в основной базе отменён`);
       } else {
         console.log(`Статус ${status} игнорирован для заказа ${id} в основной базе`);
       }
     } else {
-      console.log(`Заказ с id ${id} не найден в основной базе`);
+      console.log(`Заказ с operation_id ${id} не найден в основной базе`);
     }
 
-    // =======================
-    // ВТОРАЯ БАЗА (только обновление статуса)
-    // =======================
+    // ========================
+    // ВТОРАЯ БАЗА (поиск по id, только статус)
+    // ========================
     let dbStatus = null;
     if (["IPS_ACCEPTED", "CHARGED"].includes(status)) dbStatus = "Оплачено";
     else if (status === "DECLINED") dbStatus = "Отменен";
 
     if (dbStatus) {
-      const result2 = await orders2.updateOne({ id }, { $set: { status: dbStatus } });
+      const result2 = await orders2.updateOne(
+        { id }, // <- поиск по id во второй базе
+        { $set: { status: dbStatus } }
+      );
       if (result2.matchedCount === 0) {
         console.log(`Во второй базе заказ с id ${id} не найден`);
       } else {
