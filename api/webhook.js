@@ -18,17 +18,19 @@ KsdjLKRDtKpXormCUTs/V+0CAwEAAQ==
 
 export const config = { api: { bodyParser: false } };
 
-let clientPromise;
+// ====================
+// КЭШ КЛИЕНТА MONGO
+// ====================
+let cachedClient = null;
+let cachedDb1 = null;
+let cachedDb2 = null;
 
 async function getMongoClient() {
-  if (!process.env.MONGODB_URI) {
-    throw new Error("MONGODB_URI не задана в переменных окружения");
-  }
-  if (!clientPromise) {
-    const client = new MongoClient(process.env.MONGODB_URI);
-    clientPromise = client.connect();
-  }
-  return clientPromise;
+  if (!process.env.MONGODB_URI) throw new Error("MONGODB_URI не задана");
+  if (cachedClient) return cachedClient;
+  const client = new MongoClient(process.env.MONGODB_URI);
+  cachedClient = await client.connect();
+  return cachedClient;
 }
 
 export default async function handler(req, res) {
@@ -47,41 +49,97 @@ export default async function handler(req, res) {
     const isValid = verifier.verify(PUBLIC_KEY, Buffer.from(signature, "base64"));
     if (!isValid) return res.status(400).json({ error: "Invalid signature" });
 
-    // Разбор JSON
     const { order } = JSON.parse(rawBody);
     const { id, status } = order;
 
-    // Определяем статус для базы
+    // =======================
+    // ПОДКЛЮЧЕНИЕ К БАЗАМ
+    // =======================
+    const mongoClient = await getMongoClient();
+
+    if (!cachedDb1) cachedDb1 = mongoClient.db(process.env.MONGODB_DB);
+    if (!cachedDb2) cachedDb2 = mongoClient.db(process.env.MONGODB_DB2);
+
+    const orders1 = cachedDb1.collection("orders");
+    const orders2 = cachedDb2.collection("orders");
+
+    // =======================
+    // ПЕРВАЯ БАЗА (основная)
+    // =======================
+    const orderInDb = await orders1.findOne({ id });
+    if (orderInDb) {
+      if (["IPS_ACCEPTED", "CHARGED"].includes(status)) {
+        await orders1.updateOne({ id }, { $set: { status: "Оплачено" } });
+
+        // Получаем exchange_rate
+        const rateRes = await fetch("https://desslyhub.com/api/v1/exchange_rate/steam/5", {
+          method: "GET",
+          headers: { apikey: "17bc36e1b7084bee862d02b23d02d513" }
+        });
+        const rateData = await rateRes.json();
+        const exchange_rate = rateData.exchange_rate;
+
+        // Рассчитываем сумму для Steam топап
+        const steamAmount = orderInDb.discountedAmount / exchange_rate;
+
+        // Отправляем POST на steamtopup
+        const topupRes = await fetch("https://desslyhub.com/api/v1/service/steamtopup/topup", {
+          method: "POST",
+          headers: {
+            apikey: "17bc36e1b7084bee862d02b23d02d513",
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            amount: steamAmount,
+            username: orderInDb.steamId
+          })
+        });
+        const topupData = await topupRes.json();
+
+        // Обновляем Mongo с transaction_id и status_steam
+        await orders1.updateOne(
+          { id },
+          {
+            $set: {
+              transaction_id: topupData.transaction_id,
+              status_steam: topupData.status
+            }
+          }
+        );
+
+        console.log(`Заказ ${id} в основной базе обработан и топап выполнен`);
+      } else if (status === "DECLINED") {
+        await orders1.updateOne({ id }, { $set: { status: "Отменен" } });
+        console.log(`Заказ ${id} в основной базе отменён`);
+      } else {
+        console.log(`Статус ${status} игнорирован для заказа ${id} в основной базе`);
+      }
+    } else {
+      console.log(`Заказ с id ${id} не найден в основной базе`);
+    }
+
+    // =======================
+    // ВТОРАЯ БАЗА (только обновление статуса)
+    // =======================
     let dbStatus = null;
     if (["IPS_ACCEPTED", "CHARGED"].includes(status)) dbStatus = "Оплачено";
     else if (status === "DECLINED") dbStatus = "Отменен";
 
-    // Если статус не "Оплачено" и не "Отменен" → игнорируем
-    if (!dbStatus) {
-      console.log(`Статус ${status} проигнорирован для заказа ${id}`);
-      return res.status(200).json({ ok: true, ignored: true });
+    if (dbStatus) {
+      const result2 = await orders2.updateOne({ id }, { $set: { status: dbStatus } });
+      if (result2.matchedCount === 0) {
+        console.log(`Во второй базе заказ с id ${id} не найден`);
+      } else {
+        console.log(`Во второй базе заказ ${id} обновлён на: ${dbStatus}`);
+      }
+    } else {
+      console.log(`Во второй базе статус ${status} игнорирован для заказа ${id}`);
     }
 
-    // Подключение к MongoDB
-    const mongoClient = await getMongoClient();
-    const db = mongoClient.db(process.env.MONGODB_DB);
-    const orders = db.collection("orders");
-
-    // Обновляем статус только если найден заказ
-    const result = await orders.updateOne(
-      { id },
-      { $set: { status: dbStatus } }
-    );
-
-    if (result.matchedCount === 0) {
-      console.log(`Заказ с id ${id} не найден в базе`);
-      return res.status(404).json({ error: "Заказ не найден" });
-    }
-
-    console.log(`Статус заказа ${id} обновлен на: ${dbStatus}`);
     return res.status(200).json({ ok: true });
+
   } catch (err) {
-    console.error("Ошибка:", err);
+    console.error("Ошибка вебхука:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
